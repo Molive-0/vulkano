@@ -13,6 +13,7 @@ use crate::{
     command_buffer::sys::RecordingCommandBuffer,
     device::{DeviceOwned, QueueFlags},
     query::{QueryPool, QueryType},
+    range_map::RangeExt,
     DeviceSize, Requires, RequiresAllOf, RequiresOneOf, ValidationError, VulkanObject,
 };
 use smallvec::SmallVec;
@@ -787,6 +788,185 @@ impl RecordingCommandBuffer {
                 1,
                 &info_vk,
                 build_range_info_pointers_vk.as_ptr(),
+            )
+        };
+
+        self
+    }
+
+    #[inline]
+    pub unsafe fn build_acceleration_structures(
+        &mut self,
+        infos: &[AccelerationStructureBuildGeometryInfo],
+        build_range_infos: &[SmallVec<[AccelerationStructureBuildRangeInfo; 8]>],
+    ) -> Result<&mut Self, Box<ValidationError>> {
+        self.validate_build_acceleration_structures(infos, build_range_infos)?;
+
+        Ok(unsafe { self.build_acceleration_structures_unchecked(infos, build_range_infos) })
+    }
+
+    pub(crate) fn validate_build_acceleration_structures(
+        &self,
+        infos: &[AccelerationStructureBuildGeometryInfo],
+        build_range_infos: &[SmallVec<[AccelerationStructureBuildRangeInfo; 8]>],
+    ) -> Result<(), Box<ValidationError>> {
+        if infos.len() != build_range_infos.len() {
+            return Err(Box::new(ValidationError {
+                context: format!(
+                    "infos len {}, build_range_infos len {}",
+                    infos.len(),
+                    build_range_infos.len()
+                )
+                .into(),
+                problem: "the count of info structures and build range info arrays must be equal"
+                    .into(),
+                vuids: &[
+                    "VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-parameter",
+                    "VUID-vkCmdBuildAccelerationStructuresKHR-ppBuildRangeInfos-parameter",
+                ],
+                ..Default::default()
+            }));
+        }
+
+        for (info, build_range_info) in infos.iter().zip(build_range_infos.iter()) {
+            self.validate_build_acceleration_structure(info, build_range_info)?;
+        }
+
+        // VUID-vkCmdBuildAccelerationStructuresKHR-pInfos-03403
+        // There is no source acceleration structure?
+
+        // VUID-vkCmdBuildAccelerationStructuresKHR-None-03407
+        //for info1 in infos {
+        //    for info2 in infos {
+        //        if std::ptr::eq(info1, info2) {
+        //            continue;
+        //        }
+        //        match info2.geometries {
+        //            AccelerationStructureGeometries::Instances(
+        //                instances,
+        //            ) => {
+        //                instances.data
+        //            },
+        //            _ => {}
+        //        }
+        //    }
+        //}
+
+        for info1 in infos {
+            for info2 in infos {
+                if std::ptr::eq(info1, info2) {
+                    continue;
+                }
+                // VUID-vkCmdBuildAccelerationStructuresKHR-dstAccelerationStructure-03698
+                if info1
+                    .dst_acceleration_structure
+                    .as_ref()
+                    .is_some_and(|dst1| {
+                        info2
+                            .dst_acceleration_structure
+                            .as_ref()
+                            .is_some_and(|dst2| dst1.id() == dst2.id())
+                    })
+                {
+                    return Err(Box::new(ValidationError {
+                        context: format!("info 1 {:?}, info 2 {:?}", info1, info2).into(),
+                        problem:
+                            "two info structures cannot have the same destination acceleration structure"
+                                .into(),
+                        vuids: &[
+                            "VUID-vkCmdBuildAccelerationStructuresKHR-dstAccelerationStructure-03698",
+                        ],
+                        ..Default::default()
+                    }));
+                }
+
+                // VUID-vkCmdBuildAccelerationStructuresKHR-dstAccelerationStructure-03702
+                if info1
+                    .dst_acceleration_structure
+                    .as_ref()
+                    .is_some_and(|dst1| {
+                        info2
+                            .dst_acceleration_structure
+                            .as_ref()
+                            .is_some_and(|dst2| {
+                                dst1.buffer().range().overlaps(&dst2.buffer().range())
+                            })
+                    })
+                {
+                    return Err(Box::new(ValidationError {
+                        context: format!("info 1 {:?}, info 2 {:?}", info1, info2).into(),
+                        problem:
+                            "two info structures cannot have destination acceleration structures that overlap"
+                                .into(),
+                        vuids: &[
+                            "VUID-vkCmdBuildAccelerationStructuresKHR-dstAccelerationStructure-03702",
+                        ],
+                        ..Default::default()
+                    }));
+                }
+
+                // VUID-vkCmdBuildAccelerationStructuresKHR-scratchData-03704
+                if info1.scratch_data.as_ref().is_some_and(|scratch1| {
+                    info2
+                        .scratch_data
+                        .as_ref()
+                        .is_some_and(|scratch2| scratch1.range().overlaps(&scratch2.range()))
+                }) {
+                    return Err(Box::new(ValidationError {
+                        context: format!("info 1 {:?}, info 2 {:?}", info1, info2).into(),
+                        problem:
+                            "two info structures cannot have scratch data buffers that overlap"
+                                .into(),
+                        vuids: &["VUID-vkCmdBuildAccelerationStructuresKHR-scratchData-03704"],
+                        ..Default::default()
+                    }));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
+    pub unsafe fn build_acceleration_structures_unchecked(
+        &mut self,
+        infos: &[AccelerationStructureBuildGeometryInfo],
+        build_range_infos: &[SmallVec<[AccelerationStructureBuildRangeInfo; 8]>],
+    ) -> &mut Self {
+        let info_fields1_vk: SmallVec<[_; 8]> = infos
+            .iter()
+            .map(AccelerationStructureBuildGeometryInfo::to_vk_fields1)
+            .collect();
+        let info_vk: SmallVec<[_; 8]> = infos
+            .iter()
+            .zip(info_fields1_vk.iter())
+            .map(|(info, info_fields1_vk)| info.to_vk(&info_fields1_vk))
+            .collect();
+
+        let build_range_infos: SmallVec<[_; 8]> = build_range_infos
+            .iter()
+            .map(|build_range_infos| {
+                let build_range_info_elements_vk: SmallVec<[_; 8]> = build_range_infos
+                    .iter()
+                    .map(AccelerationStructureBuildRangeInfo::to_vk)
+                    .collect();
+                build_range_info_elements_vk
+            })
+            .collect();
+
+        let build_range_info_pointers: SmallVec<[_; 8]> = build_range_infos
+            .iter()
+            .map(|build_range_infos| build_range_infos.as_ptr())
+            .collect();
+
+        let fns = self.device().fns();
+        unsafe {
+            (fns.khr_acceleration_structure
+                .cmd_build_acceleration_structures_khr)(
+                self.handle(),
+                1,
+                info_vk.as_ptr(),
+                build_range_info_pointers.as_ptr(),
             )
         };
 

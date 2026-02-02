@@ -123,6 +123,59 @@ impl<L> AutoCommandBufferBuilder<L> {
         self
     }
 
+    #[inline]
+    pub unsafe fn build_acceleration_structures(
+        &mut self,
+        infos: SmallVec<[AccelerationStructureBuildGeometryInfo; 8]>,
+        build_range_infos: SmallVec<[SmallVec<[AccelerationStructureBuildRangeInfo; 8]>; 8]>,
+    ) -> Result<&mut Self, Box<ValidationError>> {
+        self.validate_build_acceleration_structures(&infos, &build_range_infos)?;
+
+        Ok(unsafe { self.build_acceleration_structures_unchecked(infos, build_range_infos) })
+    }
+
+    fn validate_build_acceleration_structures(
+        &self,
+        infos: &[AccelerationStructureBuildGeometryInfo],
+        build_range_infos: &[SmallVec<[AccelerationStructureBuildRangeInfo; 8]>],
+    ) -> Result<(), Box<ValidationError>> {
+        self.inner
+            .validate_build_acceleration_structures(infos, build_range_infos)?;
+
+        if self.builder_state.render_pass.is_some() {
+            return Err(Box::new(ValidationError {
+                context: "self".into(),
+                problem: "a render pass instance is active".into(),
+                vuids: &["VUID-vkCmdBuildAccelerationStructuresKHR-renderpass"],
+                ..Default::default()
+            }));
+        }
+
+        Ok(())
+    }
+
+    #[cfg_attr(not(feature = "document_unchecked"), doc(hidden))]
+    pub unsafe fn build_acceleration_structures_unchecked(
+        &mut self,
+        infos: SmallVec<[AccelerationStructureBuildGeometryInfo; 8]>,
+        build_range_infos: SmallVec<[SmallVec<[AccelerationStructureBuildRangeInfo; 8]>; 8]>,
+    ) -> &mut Self {
+        let mut used_resources = Vec::new();
+        for info in infos.iter() {
+            add_build_geometry_resources(&mut used_resources, info);
+        }
+
+        self.add_command(
+            "build_acceleration_structure",
+            used_resources,
+            move |out: &mut RecordingCommandBuffer| {
+                unsafe { out.build_acceleration_structures_unchecked(&infos, &build_range_infos) };
+            },
+        );
+
+        self
+    }
+
     /// Builds or updates an acceleration structure, using [`AccelerationStructureBuildRangeInfo`]
     /// elements stored in an indirect buffer.
     ///
